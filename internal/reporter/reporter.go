@@ -1,0 +1,198 @@
+package reporter
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+	
+	"github.com/deepam02/securerabbit/internal/findings"
+	"github.com/deepam02/securerabbit/internal/types"
+)
+
+// Reporter generates security scan reports
+type Reporter struct {
+	format     string
+	outputPath string
+}
+
+// NewReporter creates a new reporter
+func NewReporter(format, outputPath string) *Reporter {
+	return &Reporter{
+		format:     format,
+		outputPath: outputPath,
+	}
+}
+
+// Generate creates a report from scan results
+func (r *Reporter) Generate(result *types.ScanResult) error {
+	switch r.format {
+	case "json":
+		return r.generateJSON(result)
+	case "markdown":
+		return r.generateMarkdown(result)
+	default:
+		return fmt.Errorf("unsupported output format: %s", r.format)
+	}
+}
+
+// generateJSON creates a JSON report
+func (r *Reporter) generateJSON(result *types.ScanResult) error {
+	// Pretty print JSON
+	data, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal JSON: %w", err)
+	}
+	
+	// Write to file
+	if err := os.WriteFile(r.outputPath, data, 0644); err != nil {
+		return fmt.Errorf("failed to write JSON report: %w", err)
+	}
+	
+	return nil
+}
+
+// generateMarkdown creates a Markdown report
+func (r *Reporter) generateMarkdown(result *types.ScanResult) error {
+	var sb strings.Builder
+	
+	// Header
+	sb.WriteString("# SecureRabbit Security Scan Report\n\n")
+	sb.WriteString(fmt.Sprintf("**Generated:** %s\n\n", time.Now().Format("2006-01-02 15:04:05")))
+	
+	// Summary
+	sb.WriteString("## Summary\n\n")
+	sb.WriteString(fmt.Sprintf("- **Project Path:** `%s`\n", result.ProjectPath))
+	sb.WriteString(fmt.Sprintf("- **Scan Mode:** %s\n", result.ScanMode))
+	sb.WriteString(fmt.Sprintf("- **Scan Duration:** %s\n", result.Duration))
+	sb.WriteString(fmt.Sprintf("- **Files Scanned:** %d\n", result.FilesScanned))
+	sb.WriteString(fmt.Sprintf("- **Total Findings:** %d\n", result.TotalFindings))
+	
+	if !result.StaticOnly {
+		sb.WriteString(fmt.Sprintf("- **LLM Provider:** %s\n", result.LLMProvider))
+	} else {
+		sb.WriteString("- **Analysis Type:** Static Only\n")
+	}
+	sb.WriteString("\n")
+	
+	// Severity breakdown
+	severityCounts := findings.CountBySeverity(result.Findings)
+	sb.WriteString("### Findings by Severity\n\n")
+	sb.WriteString("| Severity | Count |\n")
+	sb.WriteString("|----------|-------|\n")
+	
+	severities := []types.Severity{
+		types.SeverityCritical,
+		types.SeverityHigh,
+		types.SeverityMedium,
+		types.SeverityLow,
+		types.SeverityInfo,
+	}
+	
+	for _, sev := range severities {
+		count := severityCounts[sev]
+		if count > 0 {
+			emoji := getSeverityEmoji(sev)
+			sb.WriteString(fmt.Sprintf("| %s %s | %d |\n", emoji, sev, count))
+		}
+	}
+	sb.WriteString("\n")
+	
+	// Findings by file
+	if len(result.Findings) > 0 {
+		sb.WriteString("## Findings by File\n\n")
+		
+		fileGroups := findings.GroupByFile(result.Findings)
+		for filePath, fileFindings := range fileGroups {
+			relPath := filepath.Base(filePath)
+			sb.WriteString(fmt.Sprintf("### %s\n\n", relPath))
+			sb.WriteString(fmt.Sprintf("**Full Path:** `%s`\n\n", filePath))
+			sb.WriteString(fmt.Sprintf("**Issues Found:** %d\n\n", len(fileFindings)))
+			
+			for i, finding := range fileFindings {
+				sb.WriteString(fmt.Sprintf("#### %d. %s\n\n", i+1, finding.Title))
+				
+				// Severity badge
+				emoji := getSeverityEmoji(finding.Severity)
+				sb.WriteString(fmt.Sprintf("**Severity:** %s %s", emoji, finding.Severity))
+				
+				// Source badge
+				sb.WriteString(fmt.Sprintf(" | **Source:** %s", finding.Source))
+				
+				// Line numbers
+				if finding.StartLine == finding.EndLine {
+					sb.WriteString(fmt.Sprintf(" | **Line:** %d\n\n", finding.StartLine))
+				} else {
+					sb.WriteString(fmt.Sprintf(" | **Lines:** %d-%d\n\n", finding.StartLine, finding.EndLine))
+				}
+				
+				// OWASP mapping
+				if finding.OWASPID != "" {
+					sb.WriteString(fmt.Sprintf("**OWASP:** %s", finding.OWASPID))
+				}
+				if finding.CWE != "" {
+					sb.WriteString(fmt.Sprintf(" | **CWE:** %s", finding.CWE))
+				}
+				sb.WriteString("\n\n")
+				
+				// Description
+				if finding.Description != "" {
+					sb.WriteString("**Description:**\n\n")
+					sb.WriteString(finding.Description)
+					sb.WriteString("\n\n")
+				}
+				
+				// Code snippet
+				if finding.CodeSnippet != "" {
+					sb.WriteString("**Code:**\n\n")
+					sb.WriteString("```\n")
+					sb.WriteString(finding.CodeSnippet)
+					sb.WriteString("\n```\n\n")
+				}
+				
+				// Recommendation
+				if finding.Recommendation != "" {
+					sb.WriteString("**Recommendation:**\n\n")
+					sb.WriteString(finding.Recommendation)
+					sb.WriteString("\n\n")
+				}
+				
+				sb.WriteString("---\n\n")
+			}
+		}
+	} else {
+		sb.WriteString("## No Security Issues Found\n\n")
+		sb.WriteString("Great! The scan did not detect any security vulnerabilities.\n\n")
+	}
+	
+	// Footer
+	sb.WriteString("---\n\n")
+	sb.WriteString("*Generated by SecureRabbit - Security Code Analysis Tool*\n")
+	
+	// Write to file
+	if err := os.WriteFile(r.outputPath, []byte(sb.String()), 0644); err != nil {
+		return fmt.Errorf("failed to write Markdown report: %w", err)
+	}
+	
+	return nil
+}
+
+// getSeverityEmoji returns an emoji for each severity level
+func getSeverityEmoji(severity types.Severity) string {
+	switch severity {
+	case types.SeverityCritical:
+		return "🔴"
+	case types.SeverityHigh:
+		return "🟠"
+	case types.SeverityMedium:
+		return "🟡"
+	case types.SeverityLow:
+		return "🔵"
+	case types.SeverityInfo:
+		return "⚪"
+	default:
+		return "⚫"
+	}
+}
